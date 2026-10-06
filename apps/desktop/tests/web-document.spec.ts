@@ -27,12 +27,38 @@ it('serves the Web entry and assets without starting or contacting a Host', asyn
   expect((await serveWebDocument(new Request('dsh-app://app/missing.js'), root)).status).toBe(404)
 })
 
+it('serves HEAD and unknown asset types while rejecting invalid paths and methods', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-assets-'))
+  roots.push(root)
+  await writeFile(join(root, 'payload.bin'), 'asset bytes')
+  const response = await serveWebDocument(new Request('dsh-app://app/payload.bin', { method: 'HEAD' }), root)
+  expect(response.headers.get('content-type')).toBe('application/octet-stream')
+  expect(await response.text()).toBe('')
+  expect((await serveWebDocument(new Request('dsh-app://app/%ZZ'), root)).status).toBe(400)
+  expect((await serveWebDocument(new Request('dsh-app://app/payload.bin', { method: 'POST' }), root)).status).toBe(405)
+})
+
+it('reports an asset read failure that is not a missing file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-read-'))
+  roots.push(root)
+  await mkdir(join(root, 'directory'))
+  await expect(serveWebDocument(new Request('dsh-app://app/directory'), root)).rejects.toMatchObject({ code: 'EISDIR' })
+})
+
 it('requires the Host authentication exchange and retains only its cookie value', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 303, headers: { 'set-cookie': 'session=owned; HttpOnly; SameSite=Strict' } }))
     .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
   vi.stubGlobal('fetch', fetch)
   expect(await authenticateWebHost('http://127.0.0.1:1234/?token=owned')).toBe('session=owned')
   await expect(authenticateWebHost('http://127.0.0.1:1234/')).rejects.toThrow('authentication failed')
+})
+
+it('retains a cookie without attributes and refuses a redirect without an authentication cookie', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response(null, { status: 303, headers: { 'set-cookie': 'session=owned' } }))
+    .mockResolvedValueOnce(new Response(null, { status: 303 })))
+  expect(await authenticateWebHost('http://127.0.0.1:1234/?token=owned')).toBe('session=owned')
+  await expect(authenticateWebHost('http://127.0.0.1:1234/?token=owned')).rejects.toThrow('authentication failed')
 })
 
 it('forwards upload bytes and cancellation with Host credentials while keeping the response streaming', async () => {
@@ -46,12 +72,27 @@ it('forwards upload bytes and cancellation with Host credentials while keeping t
   const [target, init] = fetch.mock.calls[0] as [URL, RequestInit]
   expect(target.href).toBe('http://127.0.0.1:1234/api/upload?name=file')
   expect(new Headers(init.headers).get('cookie')).toBe('session=owned')
-  expect(new Headers(init.headers).get('origin')).toBeNull()
+  expect(new Headers(init.headers).get('origin')).toBe('http://127.0.0.1:1234')
+  expect(new Headers(init.headers).get('sec-fetch-site')).toBe('same-origin')
   expect(init.signal).toBe(request.signal)
   expect(init.body).toBe(request.body)
   expect(response.headers.get('set-cookie')).toBeNull()
   expect(response.headers.get('content-encoding')).toBeNull()
   expect(await response.text()).toBe('stream')
+})
+
+it('supplies the Host origin for application POSTs that omit a browser Origin header', async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } }))
+  vi.stubGlobal('fetch', fetch)
+  const request = new Request('dsh-app://app/_dsh/editor/launch', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' }, body: '{}',
+  })
+  const response = await forwardWebRequest(request, 'http://127.0.0.1:1234/', 'session=owned')
+  const [, init] = fetch.mock.calls[0] as [URL, RequestInit]
+  expect(new Headers(init.headers).get('origin')).toBe('http://127.0.0.1:1234')
+  expect(new Headers(init.headers).get('sec-fetch-site')).toBe('same-origin')
+  expect(new Headers(init.headers).get('cookie')).toBe('session=owned')
+  expect(await response.json()).toEqual({ ok: true })
 })
 
 it('drops connection-level headers the Host wrote for its own transport', async () => {
@@ -79,10 +120,10 @@ it('replaces the immutable cache header of plugin bundles with no-store and leav
   expect(asset.headers.get('cache-control')).toBe(immutable)
 })
 
-it('refuses another page origin without forwarding its request', async () => {
+it.each(['https://other.example', 'null', 'dsh-app://shell'])('refuses page origin %s without forwarding its request', async (origin) => {
   const fetch = vi.fn()
   vi.stubGlobal('fetch', fetch)
-  const response = await forwardWebRequest(new Request('dsh-app://app/api/read', { headers: { origin: 'https://other.example' } }), 'http://127.0.0.1:1234/', 'session=owned')
+  const response = await forwardWebRequest(new Request('dsh-app://app/api/read', { headers: { origin } }), 'http://127.0.0.1:1234/', 'session=owned')
   expect(response.status).toBe(403)
   expect(fetch).not.toHaveBeenCalled()
 })

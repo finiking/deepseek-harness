@@ -65,7 +65,7 @@ const WITHHELD_RESPONSE_HEADERS = [
 const PLUGIN_BUNDLE_PATH = /^\/plugins\//u
 
 /**
- * Forward local application requests to its authenticated Host, preserving streaming and cancellation.
+ * Forward application requests with Host authentication and same-origin headers, preserving streaming and cancellation.
  * Plugin bundle responses lose their `cache-control` for `no-store`: the Host marks them immutable
  * under a revision that changes every launch, so Chromium's disk cache would only accumulate bundles
  * no later launch can reuse.
@@ -84,6 +84,8 @@ export async function forwardWebRequest(request: Request, host: string, cookie: 
   const headers = new Headers(request.headers)
   for (const name of ['host', 'origin', 'cookie', 'sec-fetch-site']) headers.delete(name)
   headers.set('cookie', cookie)
+  headers.set('origin', target.origin)
+  headers.set('sec-fetch-site', 'same-origin')
   const init = { method: request.method, headers, body: request.body, signal: request.signal, duplex: 'half', redirect: 'manual' as const }
   const response = await fetch(target, init)
   const outgoing = new Headers(response.headers)
